@@ -31,13 +31,7 @@ CREATE TABLE IF NOT EXISTS public.products (
     category_name TEXT NOT NULL DEFAULT 'Allopathic',
     mrp NUMERIC(10, 2) NOT NULL DEFAULT 0.00,
     selling_price NUMERIC(10, 2) NOT NULL DEFAULT 0.00,
-    discount_percentage NUMERIC(5, 2) GENERATED ALWAYS AS (
-        CASE 
-            WHEN mrp > 0 AND mrp >= selling_price 
-            THEN ROUND(((mrp - selling_price) / mrp) * 100, 2)
-            ELSE 0.00 
-        END
-    ) STORED,
+    discount_percentage NUMERIC(5, 2) DEFAULT 0.00,
     unit TEXT NOT NULL DEFAULT 'Strips',
     in_stock BOOLEAN NOT NULL DEFAULT TRUE,
     stock_quantity INT4 NOT NULL DEFAULT 0,

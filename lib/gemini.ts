@@ -3,26 +3,27 @@ import { ExtractedProductData, ProductCategory } from './types';
 
 const PHARMACY_SYSTEM_PROMPT = `
 You are an expert pharmaceutical vision scanner and medical store inventory assistant.
-Your task is to analyze the image of a medicine package, blister strip, syrup bottle, cosmetic product, ointment tube, or surgical item.
+Your task is to analyze the image(s) of a medicine package, blister strip, syrup bottle, cosmetic product, ointment tube, or surgical item.
+Extract pharmaceutical details across all provided packaging images. If any field (such as batch_no, expiry_date, mrp, manufacturer) is missing or illegible, return an empty string ("") or null. DO NOT hallucinate or extrapolate missing values.
 
-Analyze all visible text, branding, formulations, dates, prices, and barcodes.
-You MUST output ONLY a valid JSON object (no markdown, no extra commentary, no code fences) with the following structure:
+Analyze all visible text, branding, formulations, dates, prices, and barcodes across all provided images (e.g. front, back, side panels).
+You MUST output ONLY a valid JSON object (no markdown formatting, no code fences) with the following structure:
 {
   "name": "Full medicine/product commercial name along with strength (e.g. Augmentin 625 Duo Tablet, Cetaphil Cleanser 250ml)",
   "category_name": "One of: Allopathic, Ayurvedic, Cosmetics, Provisional, Surgical",
-  "mrp": 0.00, // Maximum Retail Price printed on packaging (numeric float)
-  "selling_price": 0.00, // Suggest a selling price with standard 5-10% discount from MRP (numeric float)
-  "discount_percentage": 10.0, // Calculated discount percentage (numeric float)
+  "mrp": null, // Exact Maximum Retail Price (numeric float) printed on packaging. If missing/illegible, return null. DO NOT hallucinate.
+  "selling_price": null, // Suggested selling price with standard 5-10% discount from MRP (numeric float). If mrp is null, return null.
+  "discount_percentage": null, // Calculated discount percentage (numeric float). If mrp is null, return null.
   "unit": "One of: Strips, Bottle, Box, Tube, Vial, Syrup, Pcs, Packet",
-  "stock_quantity": 10, // Suggested default inventory stock quantity (numeric integer)
-  "batch_no": "Batch/Lot number printed on packaging (e.g. B.No. 24B09)",
-  "expiry_date": "Expiry date in YYYY-MM or MM/YY format (e.g. 2027-05 or 05/27)",
-  "manufacturer": "Company / Pharmaceutical laboratory that manufactured it",
-  "barcode": "Barcode number digits if visible",
-  "composition": "Active pharmaceutical ingredient / chemical salt / herbal composition",
-  "dosage": "Recommended usage or dosage instructions if visible",
+  "stock_quantity": 10, // Suggested default stock count
+  "batch_no": "", // Exact printed Batch/Lot number. If missing or illegible, return "". DO NOT hallucinate or extrapolate.
+  "expiry_date": "", // Exact printed Expiry date (e.g. 2027-05 or 05/27). If missing or illegible, return "". DO NOT hallucinate.
+  "manufacturer": "", // Company / laboratory that manufactured it. If missing, return "".
+  "barcode": "", // Barcode numeric digits if visible. If missing, return "".
+  "composition": "", // Active pharmaceutical ingredient / chemical salt / herbal composition if visible.
+  "dosage": "", // Recommended usage or dosage instructions if visible.
   "confidence_score": 95, // 0 to 100 estimated confidence
-  "raw_notes": "Brief notes on packaging details observed"
+  "raw_notes": "Brief notes on packaging details observed across images"
 }
 
 Categorization Rules:
@@ -31,39 +32,64 @@ Categorization Rules:
 - Cosmetics: Skincare, sunscreens, derma lotions, shampoos, face washes, cleansers.
 - Provisional: Nutrition powders, OTC health drinks, baby food, antiseptics (Dettol, Savlon, Ensure, Protinex).
 - Surgical: Syringes, cotton, bandages, surgical tape, BP monitors, thermometers, latex gloves, catheter.
-
-If any field cannot be determined with certainty, provide a best-effort realistic estimate.
 `;
 
-export async function extractMedicineData(
-  imageBase64: string,
-  apiKey?: string
-): Promise<{ data: ExtractedProductData; isLiveGemini: boolean; rawResponse?: string }> {
-  const activeKey = apiKey || process.env.GEMINI_API_KEY || process.env.NEXT_PUBLIC_GEMINI_API_KEY;
+interface CleanImagePart {
+  data: string;
+  mimeType: string;
+}
 
-  // Clean base64 string
-  let base64Clean = imageBase64;
+function parseBase64Image(raw: string): CleanImagePart {
+  let base64Clean = raw;
   let mimeType = 'image/jpeg';
 
-  if (imageBase64.startsWith('data:')) {
-    const match = imageBase64.match(/^data:(image\/[a-zA-Z+]+);base64,(.+)$/);
+  if (raw.startsWith('data:')) {
+    const match = raw.match(/^data:(image\/[a-zA-Z+]+);base64,(.+)$/);
     if (match) {
       mimeType = match[1];
       base64Clean = match[2];
     } else {
-      const commaIdx = imageBase64.indexOf(',');
+      const commaIdx = raw.indexOf(',');
       if (commaIdx !== -1) {
-        base64Clean = imageBase64.slice(commaIdx + 1);
+        base64Clean = raw.slice(commaIdx + 1);
       }
     }
   }
 
+  return { data: base64Clean, mimeType };
+}
+
+export async function extractMedicineData(
+  images: string | string[],
+  apiKey?: string
+): Promise<{ data: ExtractedProductData; isLiveGemini: boolean; rawResponse?: string }> {
+  const activeKey = apiKey || process.env.GEMINI_API_KEY || process.env.NEXT_PUBLIC_GEMINI_API_KEY;
+
+  const rawArray = Array.isArray(images) ? images : [images];
+  const validImages = rawArray.filter(img => typeof img === 'string' && img.trim().length > 0).slice(0, 3);
+
+  if (validImages.length === 0) {
+    throw new Error('No valid images provided for extraction.');
+  }
+
+  const cleanParts = validImages.map(parseBase64Image);
+
   if (activeKey && activeKey.trim().length > 10) {
     try {
       const genAI = new GoogleGenerativeAI(activeKey.trim());
-      // Try gemini-1.5-flash first, then gemini-1.5-pro
+      // Try gemini-1.5-flash first, then gemini-2.0-flash, then gemini-1.5-pro
       const modelNames = ['gemini-1.5-flash', 'gemini-2.0-flash', 'gemini-1.5-pro'];
       let responseText = '';
+
+      const contentPayload: any[] = [
+        PHARMACY_SYSTEM_PROMPT,
+        ...cleanParts.map(part => ({
+          inlineData: {
+            data: part.data,
+            mimeType: part.mimeType,
+          },
+        })),
+      ];
 
       for (const modelName of modelNames) {
         try {
@@ -75,16 +101,7 @@ export async function extractMedicineData(
             },
           });
 
-          const result = await model.generateContent([
-            PHARMACY_SYSTEM_PROMPT,
-            {
-              inlineData: {
-                data: base64Clean,
-                mimeType: mimeType,
-              },
-            },
-          ]);
-
+          const result = await model.generateContent(contentPayload);
           responseText = result.response.text();
           if (responseText) break;
         } catch (subErr) {
@@ -93,7 +110,6 @@ export async function extractMedicineData(
       }
 
       if (responseText) {
-        // Strip markdown if present
         let cleaned = responseText.trim();
         if (cleaned.startsWith('```json')) {
           cleaned = cleaned.replace(/^```json\s*/, '').replace(/\s*```$/, '');
@@ -107,27 +123,36 @@ export async function extractMedicineData(
       }
     } catch (err: any) {
       console.error('Error invoking Gemini Vision API:', err);
-      // Fallback gracefully below
     }
   }
 
-  // Graceful intelligent simulation fallback when key is not configured or network failed
-  const simulated = getSimulatedExtraction(base64Clean);
+  // Graceful fallback heuristic when key is not configured or failed
+  const simulated = getSimulatedExtraction(cleanParts[0].data);
   return {
     data: simulated,
     isLiveGemini: false,
-    rawResponse: 'Generated via intelligent fallback heuristic (configure GEMINI_API_KEY in Settings for live Google Gemini processing)'
+    rawResponse: 'Generated via fallback heuristic (configure GEMINI_API_KEY in Settings for live Google Gemini processing)'
   };
 }
 
 function normalizeExtractedData(parsed: any): ExtractedProductData {
-  const mrp = Number(parsed.mrp) || 150.00;
-  let selling = Number(parsed.selling_price) || (mrp * 0.9);
+  const rawMrp = parsed.mrp;
+  const hasValidMrp = rawMrp !== null && rawMrp !== undefined && !isNaN(Number(rawMrp)) && Number(rawMrp) > 0;
+  const mrp = hasValidMrp ? Number(rawMrp) : 0;
+
+  let selling = 0;
+  if (parsed.selling_price !== null && parsed.selling_price !== undefined && !isNaN(Number(parsed.selling_price))) {
+    selling = Number(parsed.selling_price);
+  } else if (hasValidMrp) {
+    selling = mrp * 0.9;
+  }
   if (selling > mrp && mrp > 0) selling = mrp;
-  
-  let discount = Number(parsed.discount_percentage);
-  if (isNaN(discount) || discount <= 0) {
-    discount = mrp > 0 ? Number((((mrp - selling) / mrp) * 100).toFixed(2)) : 0;
+
+  let discount = 0;
+  if (parsed.discount_percentage !== null && parsed.discount_percentage !== undefined && !isNaN(Number(parsed.discount_percentage))) {
+    discount = Number(parsed.discount_percentage);
+  } else if (hasValidMrp && mrp > 0) {
+    discount = Number((((mrp - selling) / mrp) * 100).toFixed(2));
   }
 
   // Valid category
@@ -143,26 +168,25 @@ function normalizeExtractedData(parsed: any): ExtractedProductData {
   }
 
   return {
-    name: parsed.name || 'Pharmaceutical Product',
+    name: parsed.name ? String(parsed.name).trim() : 'Pharmaceutical Product',
     category_name: category,
     mrp: Math.round(mrp * 100) / 100,
     selling_price: Math.round(selling * 100) / 100,
     discount_percentage: Math.round(discount * 100) / 100,
-    unit: parsed.unit || 'Strips',
-    stock_quantity: Number(parsed.stock_quantity) || 20,
-    batch_no: parsed.batch_no || `B-${Math.floor(1000 + Math.random() * 9000)}`,
-    expiry_date: parsed.expiry_date || '2027-12',
-    manufacturer: parsed.manufacturer || 'Standard Pharma Labs Ltd',
-    barcode: parsed.barcode || `${Math.floor(8900000000000 + Math.random() * 99999999999)}`,
-    composition: parsed.composition || 'Active Pharmaceutical Formula',
-    dosage: parsed.dosage || 'As directed by physician',
-    confidence_score: parsed.confidence_score || 94,
-    raw_notes: parsed.raw_notes || 'Successfully analyzed package typography and legal drug markings.'
+    unit: parsed.unit ? String(parsed.unit).trim() : 'Strips',
+    stock_quantity: Number(parsed.stock_quantity) || 10,
+    batch_no: parsed.batch_no ? String(parsed.batch_no).trim() : '',
+    expiry_date: parsed.expiry_date ? String(parsed.expiry_date).trim() : '',
+    manufacturer: parsed.manufacturer ? String(parsed.manufacturer).trim() : '',
+    barcode: parsed.barcode ? String(parsed.barcode).trim() : '',
+    composition: parsed.composition ? String(parsed.composition).trim() : '',
+    dosage: parsed.dosage ? String(parsed.dosage).trim() : '',
+    confidence_score: parsed.confidence_score || 95,
+    raw_notes: parsed.raw_notes ? String(parsed.raw_notes).trim() : 'Scanned packaging images.'
   };
 }
 
 function getSimulatedExtraction(base64: string): ExtractedProductData {
-  // Generate intelligent realistic medicine values
   const presets = [
     {
       name: 'Amoxicillin & Potassium Clavulanate Tablets IP 625mg',
@@ -232,14 +256,14 @@ function getSimulatedExtraction(base64: string): ExtractedProductData {
     selling_price: selling,
     discount_percentage: discount,
     unit: pick.unit,
-    stock_quantity: 25,
+    stock_quantity: 10,
     batch_no: pick.batch,
     expiry_date: pick.exp,
     manufacturer: pick.manufacturer,
     barcode: pick.barcode,
     composition: pick.comp,
     dosage: 'As prescribed by Registered Medical Practitioner',
-    confidence_score: 96,
-    raw_notes: 'Image scanned and verified with pharmaceutical product classification registry.'
+    confidence_score: 95,
+    raw_notes: 'Parsed from sample package.'
   };
 }

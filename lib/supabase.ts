@@ -195,57 +195,83 @@ export const repository = {
   // Add / Create Product
   async createProduct(productData: Omit<Product, 'id' | 'created_at' | 'updated_at'>): Promise<{ product: Product; source: 'supabase' | 'local' }> {
     const client = getSupabaseClient();
-    const newId = (typeof crypto !== 'undefined' && crypto.randomUUID) ? crypto.randomUUID() : `prod-${Date.now()}`;
     const now = new Date().toISOString();
 
+    const numMrp = Number(productData.mrp) || 0;
+    const numSelling = Number(productData.selling_price) || 0;
+    const computedDiscount = numMrp > 0 && numMrp >= numSelling 
+      ? Number((((numMrp - numSelling) / numMrp) * 100).toFixed(2))
+      : 0;
+
+    if (client) {
+      // 1. Explicitly omit discount_percentage from Supabase payload
+      // because in PostgreSQL it is defined as: GENERATED ALWAYS AS (...) STORED
+      const { discount_percentage: _stripped, ...productFields } = productData;
+
+      const insertRow: Record<string, any> = {
+        name: productFields.name.trim(),
+        category_name: productFields.category_name || 'Allopathic',
+        mrp: numMrp,
+        selling_price: numSelling,
+        unit: productFields.unit || 'Strips',
+        in_stock: (Number(productFields.stock_quantity) || 0) > 0,
+        stock_quantity: Number(productFields.stock_quantity) || 0,
+        image_url: productFields.image_url || null,
+        batch_no: productFields.batch_no || null,
+        expiry_date: productFields.expiry_date || null,
+        manufacturer: productFields.manufacturer || null,
+        barcode: productFields.barcode || null,
+        metadata: productFields.metadata || {},
+        created_at: now,
+        updated_at: now,
+      };
+
+      if (productFields.category_id) {
+        insertRow.category_id = productFields.category_id;
+      }
+
+      // Generate a compliant UUID v4
+      if (typeof crypto !== 'undefined' && crypto.randomUUID) {
+        try {
+          insertRow.id = crypto.randomUUID();
+        } catch (e) {}
+      }
+
+      const { data, error } = await client
+        .from('products')
+        .insert([insertRow])
+        .select()
+        .single();
+
+      if (error) {
+        console.error('Supabase direct insert error:', error);
+        throw error;
+      }
+
+      if (data) {
+        const savedProd = {
+          ...data,
+          discount_percentage: data.discount_percentage !== undefined && data.discount_percentage !== null
+            ? Number(data.discount_percentage)
+            : computedDiscount
+        } as Product;
+        const currentLocal = getLocalProducts();
+        saveLocalProducts([savedProd, ...currentLocal]);
+        return { product: savedProd, source: 'supabase' };
+      }
+    }
+
+    // Only fallback to local if Supabase is not configured
+    const newId = (typeof crypto !== 'undefined' && crypto.randomUUID) ? crypto.randomUUID() : `prod-${Date.now()}`;
     const newProduct: Product = {
       ...productData,
       id: newId,
+      discount_percentage: computedDiscount,
       in_stock: (Number(productData.stock_quantity) || 0) > 0,
       created_at: now,
       updated_at: now,
     };
 
-    if (client) {
-      try {
-        const { data, error } = await client
-          .from('products')
-          .insert([
-            {
-              id: newProduct.id,
-              name: newProduct.name,
-              category_name: newProduct.category_name,
-              mrp: Number(newProduct.mrp),
-              selling_price: Number(newProduct.selling_price),
-              discount_percentage: Number(newProduct.discount_percentage),
-              unit: newProduct.unit,
-              in_stock: newProduct.in_stock,
-              stock_quantity: Number(newProduct.stock_quantity),
-              image_url: newProduct.image_url,
-              batch_no: newProduct.batch_no,
-              expiry_date: newProduct.expiry_date,
-              manufacturer: newProduct.manufacturer,
-              barcode: newProduct.barcode,
-              metadata: newProduct.metadata || {},
-              created_at: now,
-              updated_at: now,
-            }
-          ])
-          .select()
-          .single();
-
-        if (!error && data) {
-          const currentLocal = getLocalProducts();
-          saveLocalProducts([data as Product, ...currentLocal]);
-          return { product: data as Product, source: 'supabase' };
-        }
-        console.warn('Supabase insert product error, saving locally:', error);
-      } catch (err) {
-        console.warn('Supabase insert exception, saving locally:', err);
-      }
-    }
-
-    // Local fallback
     const currentLocal = getLocalProducts();
     const updated = [newProduct, ...currentLocal];
     saveLocalProducts(updated);
@@ -257,32 +283,37 @@ export const repository = {
     const client = getSupabaseClient();
     const now = new Date().toISOString();
 
-    const formattedUpdates = {
-      ...updates,
+    // Explicitly omit discount_percentage so generated column error is avoided
+    const { discount_percentage: _stripped, ...safeUpdates } = updates;
+
+    const formattedUpdates: Record<string, any> = {
+      ...safeUpdates,
       updated_at: now,
       ...(updates.stock_quantity !== undefined ? { in_stock: Number(updates.stock_quantity) > 0 } : {})
     };
 
     if (client) {
-      try {
-        const { data, error } = await client
-          .from('products')
-          .update(formattedUpdates)
-          .eq('id', id)
-          .select()
-          .single();
+      const { data, error } = await client
+        .from('products')
+        .update(formattedUpdates)
+        .eq('id', id)
+        .select()
+        .single();
 
-        if (!error && data) {
-          const currentLocal = getLocalProducts().map(p => p.id === id ? { ...p, ...data } : p);
-          saveLocalProducts(currentLocal);
-          return { product: data as Product, source: 'supabase' };
-        }
-      } catch (err) {
-        console.warn('Supabase update exception, updating locally:', err);
+      if (error) {
+        console.error('Supabase direct update error:', error);
+        throw error;
+      }
+
+      if (data) {
+        const savedProd = data as Product;
+        const currentLocal = getLocalProducts().map(p => p.id === id ? { ...p, ...savedProd } : p);
+        saveLocalProducts(currentLocal);
+        return { product: savedProd, source: 'supabase' };
       }
     }
 
-    // Local fallback
+    // Local fallback if Supabase not configured
     const currentLocal = getLocalProducts();
     let updatedProduct: Product | undefined;
     const updatedList = currentLocal.map(p => {
@@ -304,10 +335,10 @@ export const repository = {
   async deleteProduct(id: string): Promise<boolean> {
     const client = getSupabaseClient();
     if (client) {
-      try {
-        await client.from('products').delete().eq('id', id);
-      } catch (err) {
-        console.warn('Supabase delete error:', err);
+      const { error } = await client.from('products').delete().eq('id', id);
+      if (error) {
+        console.error('Supabase direct delete error:', error);
+        throw new Error(error.message);
       }
     }
     const currentLocal = getLocalProducts().filter(p => p.id !== id);
@@ -352,14 +383,23 @@ export const repository = {
             upsert: true
           });
 
-        if (!error && data) {
+        if (error) {
+          console.error('Supabase storage upload error:', error);
+          if (error.message?.toLowerCase().includes('bucket not found') || (error as any).statusCode === '404') {
+            throw new Error("Supabase Storage Error: Bucket 'product-images' was not found. Please run the schema.sql in Supabase SQL Editor or create a public bucket named 'product-images'.");
+          }
+          throw new Error(`Supabase Storage Upload Error: ${error.message}`);
+        }
+
+        if (data) {
           const { data: publicUrlData } = client.storage
             .from('product-images')
             .getPublicUrl(fileName);
           return publicUrlData.publicUrl;
         }
-      } catch (err) {
-        console.warn('Supabase storage upload failed, using local/inline data:', err);
+      } catch (err: any) {
+        console.error('Supabase storage upload exception:', err);
+        throw err;
       }
     }
 
@@ -475,25 +515,16 @@ export const repository = {
 
   async seedInitialToSupabase(client: SupabaseClient): Promise<void> {
     try {
-      const formatted = INITIAL_PRODUCTS.map(p => ({
-        id: p.id,
-        name: p.name,
-        category_name: p.category_name,
-        mrp: p.mrp,
-        selling_price: p.selling_price,
-        discount_percentage: p.discount_percentage,
-        unit: p.unit,
-        in_stock: p.in_stock,
-        stock_quantity: p.stock_quantity,
-        image_url: p.image_url,
-        batch_no: p.batch_no,
-        expiry_date: p.expiry_date,
-        manufacturer: p.manufacturer,
-        barcode: p.barcode,
-        metadata: p.metadata || {},
-        created_at: p.created_at,
-        updated_at: p.updated_at
-      }));
+      const formatted = INITIAL_PRODUCTS.map(p => {
+        const { discount_percentage: _ignored, ...productData } = p;
+        return {
+          ...productData,
+          mrp: Number(p.mrp),
+          selling_price: Number(p.selling_price),
+          stock_quantity: Number(p.stock_quantity),
+          metadata: p.metadata || {},
+        };
+      });
 
       await client.from('products').upsert(formatted);
       console.log('Successfully seeded initial products to Supabase!');

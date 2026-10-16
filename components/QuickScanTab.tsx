@@ -10,21 +10,22 @@ import {
   Zap, 
   CheckCircle2, 
   AlertCircle, 
-  Loader2, 
-  Eye, 
-  FileCheck2, 
-  Layers, 
+  X, 
   ArrowRight,
-  ShieldCheck,
-  Package
+  Plus,
+  Package,
+  Layers,
+  Image as ImageIcon
 } from 'lucide-react';
-import { ExtractedProductData, Product } from '@/lib/types';
+import { ExtractedProductData } from '@/lib/types';
 import { SAMPLE_SCAN_PRESETS } from '@/lib/mockData';
 
 interface QuickScanTabProps {
-  onScanComplete: (extractedData: ExtractedProductData, scannedImage: string, isLiveGemini: boolean) => void;
+  onScanComplete: (extractedData: ExtractedProductData, scannedImages: string[], isLiveGemini: boolean) => void;
   geminiApiKey?: string;
 }
+
+const MAX_IMAGES = 3;
 
 export const QuickScanTab: React.FC<QuickScanTabProps> = ({
   onScanComplete,
@@ -32,7 +33,7 @@ export const QuickScanTab: React.FC<QuickScanTabProps> = ({
 }) => {
   const [cameraActive, setCameraActive] = useState(false);
   const [facingMode, setFacingMode] = useState<'environment' | 'user'>('environment');
-  const [selectedImage, setSelectedImage] = useState<string | null>(null);
+  const [selectedImages, setSelectedImages] = useState<string[]>([]);
   const [isScanning, setIsScanning] = useState(false);
   const [scanPhase, setScanPhase] = useState<string>('');
   const [scanProgress, setScanProgress] = useState(0);
@@ -44,7 +45,8 @@ export const QuickScanTab: React.FC<QuickScanTabProps> = ({
 
   const videoRef = useRef<HTMLVideoElement | null>(null);
   const canvasRef = useRef<HTMLCanvasElement | null>(null);
-  const fileInputRef = useRef<HTMLInputElement | null>(null);
+  const galleryInputRef = useRef<HTMLInputElement | null>(null);
+  const nativeCameraInputRef = useRef<HTMLInputElement | null>(null);
   const mediaStreamRef = useRef<MediaStream | null>(null);
 
   // Stop camera stream safely
@@ -56,7 +58,7 @@ export const QuickScanTab: React.FC<QuickScanTabProps> = ({
     setCameraActive(false);
   }, []);
 
-  // Start camera stream
+  // Start in-browser camera stream
   const startCamera = useCallback(async () => {
     setErrorMsg('');
     stopCamera();
@@ -81,14 +83,13 @@ export const QuickScanTab: React.FC<QuickScanTabProps> = ({
         videoRef.current.play();
       }
       setCameraActive(true);
-      setSelectedImage(null);
       setExtractedPreview(null);
     } catch (err: any) {
       console.warn('Camera start error:', err);
       setErrorMsg(
         err.name === 'NotAllowedError'
           ? 'Camera permission denied. Please allow camera permissions or upload an image.'
-          : 'Could not access camera. You can upload an image or choose a sample package.'
+          : 'Could not access camera. You can upload images or use sample presets.'
       );
       setCameraActive(false);
     }
@@ -111,8 +112,8 @@ export const QuickScanTab: React.FC<QuickScanTabProps> = ({
     }
   }, [facingMode]);
 
-  // Capture still from video stream
-  const capturePhoto = () => {
+  // Capture still from webcam stream
+  const capturePhotoFromStream = () => {
     if (!videoRef.current) return;
 
     const video = videoRef.current;
@@ -126,47 +127,86 @@ export const QuickScanTab: React.FC<QuickScanTabProps> = ({
     ctx.drawImage(video, 0, 0, canvas.width, canvas.height);
     const dataUrl = canvas.toDataURL('image/jpeg', 0.85);
 
-    stopCamera();
-    setSelectedImage(dataUrl);
-    processImageWithAI(dataUrl);
+    setSelectedImages((prev) => {
+      const next = [...prev, dataUrl].slice(0, MAX_IMAGES);
+      if (next.length >= MAX_IMAGES) {
+        stopCamera();
+      }
+      return next;
+    });
+
+    setExtractedPreview(null);
   };
 
-  // Handle file upload
-  const handleFileUpload = (e: React.ChangeEvent<HTMLInputElement>) => {
-    const file = e.target.files?.[0];
-    if (!file) return;
+  // Handle multi-image file uploads
+  const handleMultipleFilesUpload = (e: React.ChangeEvent<HTMLInputElement>) => {
+    const files = e.target.files;
+    if (!files || files.length === 0) return;
 
-    const reader = new FileReader();
-    reader.onload = (event) => {
-      const dataUrl = event.target?.result as string;
-      setSelectedImage(dataUrl);
-      stopCamera();
-      processImageWithAI(dataUrl);
-    };
-    reader.readAsDataURL(file);
+    setErrorMsg('');
+    const filesArray = Array.from(files);
+    const slotsRemaining = MAX_IMAGES - selectedImages.length;
+    const toProcess = filesArray.slice(0, slotsRemaining);
+
+    if (filesArray.length > slotsRemaining) {
+      setErrorMsg(`Maximum of ${MAX_IMAGES} packaging images allowed. Added first ${slotsRemaining}.`);
+    }
+
+    let loadedCount = 0;
+    const newImages: string[] = [];
+
+    toProcess.forEach((file) => {
+      const reader = new FileReader();
+      reader.onload = (event) => {
+        const dataUrl = event.target?.result as string;
+        if (dataUrl) newImages.push(dataUrl);
+        loadedCount++;
+        if (loadedCount === toProcess.length) {
+          setSelectedImages((prev) => [...prev, ...newImages].slice(0, MAX_IMAGES));
+          stopCamera();
+          setExtractedPreview(null);
+        }
+      };
+      reader.readAsDataURL(file);
+    });
+
+    // Reset input value so same files can be chosen again if removed
+    e.target.value = '';
+  };
+
+  // Remove a selected image
+  const removeImage = (indexToRemove: number) => {
+    setSelectedImages((prev) => prev.filter((_, idx) => idx !== indexToRemove));
+    setExtractedPreview(null);
+    setErrorMsg('');
   };
 
   // Handle sample preset selection
   const handleSelectPreset = (preset: typeof SAMPLE_SCAN_PRESETS[0]) => {
-    setSelectedImage(preset.image);
+    setSelectedImages([preset.image]);
     stopCamera();
-    processImageWithAI(preset.image, preset.data as unknown as ExtractedProductData);
+    processImagesWithAI([preset.image], preset.data as unknown as ExtractedProductData);
   };
 
-  // Send image to Server-side Gemini Pro Vision API
-  const processImageWithAI = async (
-    imageBase64: string,
+  // Send images to Server-side Gemini Pro Vision API
+  const processImagesWithAI = async (
+    imagesToProcess = selectedImages,
     presetData?: ExtractedProductData
   ) => {
+    if (imagesToProcess.length === 0) {
+      setErrorMsg('Please upload or capture at least 1 medicine packaging image.');
+      return;
+    }
+
     setIsScanning(true);
     setErrorMsg('');
     setExtractedPreview(null);
     setScanProgress(15);
-    setScanPhase('1/4 Analyzing packaging typography & drug barcode...');
+    setScanPhase(`1/4 Analyzing ${imagesToProcess.length} packaging angle(s)...`);
 
     const timer1 = setTimeout(() => {
       setScanProgress(45);
-      setScanPhase('2/4 Sending image to Gemini Pro Vision model...');
+      setScanPhase(`2/4 Sending multi-image payload to Gemini Pro Vision...`);
     }, 600);
 
     const timer2 = setTimeout(() => {
@@ -183,26 +223,27 @@ export const QuickScanTab: React.FC<QuickScanTabProps> = ({
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
-          image: imageBase64,
+          images: imagesToProcess,
           apiKey: geminiApiKey,
         }),
       });
 
       if (!res.ok) {
-        throw new Error(`AI scan service responded with status: ${res.status}`);
+        const errJson = await res.json().catch(() => ({}));
+        throw new Error(errJson.error || `AI scan service error (Status ${res.status})`);
       }
 
       const json = await res.json();
       finalData = json.data;
       isLive = json.isLiveGemini;
 
-      // If preset had extra details, blend for maximum realism
+      // If preset had extra details, blend
       if (presetData && !isLive) {
         finalData = { ...finalData, ...presetData };
       }
 
       setScanProgress(100);
-      setScanPhase('4/4 Extraction completed successfully!');
+      setScanPhase('4/4 Extraction completed across all angles!');
 
       setExtractedPreview({
         data: finalData,
@@ -210,14 +251,13 @@ export const QuickScanTab: React.FC<QuickScanTabProps> = ({
       });
     } catch (err: any) {
       console.error('Scan error:', err);
-      // Fallback if network fails
       if (presetData) {
         setExtractedPreview({
           data: presetData,
           isLiveGemini: false,
         });
       } else {
-        setErrorMsg('AI Extraction encountered an issue. You can still manually enter product details.');
+        setErrorMsg(err?.message || 'AI Extraction encountered an issue. You can verify and enter details manually.');
       }
     } finally {
       clearTimeout(timer1);
@@ -227,13 +267,40 @@ export const QuickScanTab: React.FC<QuickScanTabProps> = ({
   };
 
   const handleOpenVerifyModal = () => {
-    if (extractedPreview && selectedImage) {
-      onScanComplete(extractedPreview.data, selectedImage, extractedPreview.isLiveGemini);
+    if (extractedPreview && selectedImages.length > 0) {
+      onScanComplete(extractedPreview.data, selectedImages, extractedPreview.isLiveGemini);
     }
+  };
+
+  const getAngleLabel = (idx: number) => {
+    if (idx === 0) return 'Front / Name';
+    if (idx === 1) return 'Back / Batch & MRP';
+    return 'Side / Details';
   };
 
   return (
     <div className="max-w-4xl mx-auto space-y-6 pb-20">
+      {/* Hidden File Inputs */}
+      {/* 1. Multi-file upload from gallery/files */}
+      <input
+        ref={galleryInputRef}
+        type="file"
+        accept="image/*"
+        multiple
+        className="hidden"
+        onChange={handleMultipleFilesUpload}
+      />
+
+      {/* 2. Direct mobile camera capture */}
+      <input
+        ref={nativeCameraInputRef}
+        type="file"
+        accept="image/*"
+        capture="environment"
+        className="hidden"
+        onChange={handleMultipleFilesUpload}
+      />
+
       {/* Header Banner */}
       <div className="bg-gradient-to-br from-teal-900 via-teal-800 to-slate-900 rounded-3xl p-6 text-white shadow-xl relative overflow-hidden">
         <div className="absolute right-0 top-0 translate-x-12 -translate-y-12 w-64 h-64 bg-teal-500/10 rounded-full blur-3xl pointer-events-none" />
@@ -241,24 +308,24 @@ export const QuickScanTab: React.FC<QuickScanTabProps> = ({
           <div className="space-y-1">
             <div className="inline-flex items-center gap-1.5 px-3 py-1 rounded-full bg-teal-500/20 text-teal-300 text-xs font-semibold backdrop-blur-md border border-teal-500/30">
               <Sparkles className="w-3.5 h-3.5" />
-              <span>Gemini Pro Vision Engine</span>
+              <span>Gemini Multi-Angle Vision AI</span>
             </div>
             <h2 className="text-xl sm:text-2xl font-extrabold tracking-tight">
               AI Smart Medicine Scanner
             </h2>
             <p className="text-xs sm:text-sm text-teal-100/80 max-w-lg">
-              Capture or upload any medicine strip, bottle, or surgical item. AI automatically extracts Brand Name, Batch No, Expiry, MRP, and Salt Composition.
+              Capture or upload up to 3 packaging angles (front, back, and sides). Gemini extracts brand, batch no, expiry date, MRP, and composition simultaneously.
             </p>
           </div>
 
-          <div className="flex items-center gap-2">
+          <div className="flex items-center gap-2 flex-wrap">
             {!cameraActive ? (
               <button
                 onClick={startCamera}
                 className="px-4 py-2.5 rounded-xl bg-teal-500 hover:bg-teal-400 active:scale-95 text-teal-950 font-bold text-xs sm:text-sm shadow-lg shadow-teal-500/20 flex items-center gap-2 transition-all"
               >
                 <Camera className="w-4 h-4 stroke-[2.5]" />
-                <span>Launch Camera</span>
+                <span>Webcam Viewfinder</span>
               </button>
             ) : (
               <button
@@ -266,14 +333,14 @@ export const QuickScanTab: React.FC<QuickScanTabProps> = ({
                 className="px-4 py-2.5 rounded-xl bg-slate-800/80 hover:bg-slate-700 text-white font-medium text-xs sm:text-sm flex items-center gap-2 border border-slate-700 transition-all"
               >
                 <RotateCcw className="w-4 h-4" />
-                <span>Stop Camera</span>
+                <span>Close Camera</span>
               </button>
             )}
           </div>
         </div>
       </div>
 
-      {/* Main Viewfinder / Upload Area */}
+      {/* Main Container */}
       <div className="bg-white rounded-3xl p-5 sm:p-6 border border-slate-200/80 shadow-sm space-y-5">
         {errorMsg && (
           <div className="p-3.5 rounded-2xl bg-amber-50 border border-amber-200 text-amber-800 text-xs sm:text-sm flex items-center gap-2.5">
@@ -282,9 +349,9 @@ export const QuickScanTab: React.FC<QuickScanTabProps> = ({
           </div>
         )}
 
-        {/* Camera Viewfinder */}
+        {/* Live Camera Viewfinder */}
         {cameraActive && (
-          <div className="relative aspect-video max-h-[440px] w-full rounded-2xl overflow-hidden bg-slate-950 shadow-inner flex items-center justify-center">
+          <div className="relative aspect-video max-h-[420px] w-full rounded-2xl overflow-hidden bg-slate-950 shadow-inner flex items-center justify-center">
             <video
               ref={videoRef}
               playsInline
@@ -300,8 +367,8 @@ export const QuickScanTab: React.FC<QuickScanTabProps> = ({
                 <div className="w-5 h-5 border-t-4 border-r-4 border-teal-400 rounded-tr-md" />
               </div>
               <div className="text-center">
-                <span className="px-3 py-1 rounded-full bg-slate-900/70 text-teal-300 text-[11px] font-medium backdrop-blur-md">
-                  Align medicine strip or label within frame
+                <span className="px-3 py-1 rounded-full bg-slate-900/80 text-teal-300 text-[11px] font-medium backdrop-blur-md">
+                  Align packaging angle ({selectedImages.length + 1} of {MAX_IMAGES})
                 </span>
               </div>
               <div className="flex justify-between">
@@ -323,11 +390,11 @@ export const QuickScanTab: React.FC<QuickScanTabProps> = ({
 
               <button
                 type="button"
-                onClick={capturePhoto}
+                onClick={capturePhotoFromStream}
                 className="px-6 py-3.5 rounded-full bg-gradient-to-r from-teal-500 to-emerald-400 text-teal-950 font-bold text-sm shadow-xl shadow-teal-500/40 hover:scale-105 active:scale-95 flex items-center gap-2 transition-transform"
               >
                 <Zap className="w-5 h-5 fill-current" />
-                <span>Snap & Analyze Medicine</span>
+                <span>Snap Angle ({selectedImages.length + 1}/{MAX_IMAGES})</span>
               </button>
 
               <button
@@ -341,37 +408,120 @@ export const QuickScanTab: React.FC<QuickScanTabProps> = ({
           </div>
         )}
 
-        {/* Image Preview & Active Scan Laser Effect */}
-        {selectedImage && !cameraActive && (
-          <div className="relative aspect-video max-h-[380px] w-full rounded-2xl overflow-hidden bg-slate-950 border border-slate-200 flex items-center justify-center">
-            {/* eslint-disable-next-line @next/next/no-img-element */}
-            <img
-              src={selectedImage}
-              alt="Scanned Medicine"
-              className="w-full h-full object-contain"
-            />
-
-            {/* Laser sweeping animation during scanning */}
-            {isScanning && (
-              <div className="absolute inset-0 pointer-events-none">
-                <div className="w-full h-1 bg-gradient-to-r from-transparent via-teal-400 to-transparent shadow-[0_0_15px_#2dd4bf] animate-laser absolute" />
-                <div className="absolute inset-0 bg-teal-500/10 backdrop-blur-[1px]" />
+        {/* Selected Images Shelf (Thumbnails & Multi-Image Gallery) */}
+        {selectedImages.length > 0 && (
+          <div className="space-y-4">
+            <div className="flex items-center justify-between">
+              <div className="flex items-center gap-2">
+                <Layers className="w-4 h-4 text-teal-600" />
+                <h3 className="font-bold text-slate-800 text-sm">
+                  Packaging Images ({selectedImages.length}/{MAX_IMAGES})
+                </h3>
               </div>
-            )}
 
-            {/* Progress overlay */}
-            {isScanning && (
-              <div className="absolute inset-0 bg-slate-900/60 backdrop-blur-xs flex flex-col items-center justify-center p-6 text-white text-center">
-                <div className="w-14 h-14 rounded-2xl bg-teal-500/20 border border-teal-400/40 flex items-center justify-center mb-4 text-teal-400 animate-spin">
-                  <Sparkles className="w-7 h-7" />
+              <div className="flex items-center gap-2">
+                {selectedImages.length < MAX_IMAGES && (
+                  <button
+                    type="button"
+                    onClick={() => galleryInputRef.current?.click()}
+                    className="text-xs font-semibold text-teal-600 hover:text-teal-700 flex items-center gap-1"
+                  >
+                    <Plus className="w-3.5 h-3.5 stroke-[2.5]" />
+                    <span>Add Angle</span>
+                  </button>
+                )}
+                <button
+                  type="button"
+                  onClick={() => {
+                    setSelectedImages([]);
+                    setExtractedPreview(null);
+                  }}
+                  className="text-xs text-slate-400 hover:text-rose-600 font-medium ml-2"
+                >
+                  Clear All
+                </button>
+              </div>
+            </div>
+
+            {/* Thumbnail Cards Grid */}
+            <div className="grid grid-cols-1 sm:grid-cols-3 gap-3">
+              {selectedImages.map((img, idx) => (
+                <div
+                  key={idx}
+                  className="relative aspect-4/3 rounded-2xl overflow-hidden bg-slate-950 border border-slate-200 group shadow-xs"
+                >
+                  {/* eslint-disable-next-line @next/next/no-img-element */}
+                  <img
+                    src={img}
+                    alt={`Angle ${idx + 1}`}
+                    className="w-full h-full object-cover"
+                  />
+
+                  {/* Badge */}
+                  <div className="absolute top-2 left-2 px-2 py-0.5 rounded-md bg-slate-900/80 text-white text-[10px] font-semibold backdrop-blur-xs flex items-center gap-1">
+                    <span>{idx + 1}.</span>
+                    <span>{getAngleLabel(idx)}</span>
+                  </div>
+
+                  {/* Delete Button */}
+                  {!isScanning && (
+                    <button
+                      type="button"
+                      onClick={() => removeImage(idx)}
+                      title="Remove image"
+                      className="absolute top-2 right-2 w-7 h-7 rounded-full bg-slate-900/80 text-white hover:bg-rose-600 flex items-center justify-center transition-colors shadow-sm"
+                    >
+                      <X className="w-4 h-4" />
+                    </button>
+                  )}
+
+                  {/* Laser Sweeper overlay if scanning */}
+                  {isScanning && (
+                    <div className="absolute inset-0 pointer-events-none">
+                      <div className="w-full h-1 bg-gradient-to-r from-transparent via-teal-400 to-transparent shadow-[0_0_15px_#2dd4bf] animate-laser absolute" />
+                      <div className="absolute inset-0 bg-teal-500/10 backdrop-blur-[1px]" />
+                    </div>
+                  )}
                 </div>
-                <h4 className="font-bold text-lg text-white mb-1">
-                  Gemini Vision Analyzing...
-                </h4>
-                <p className="text-xs text-teal-200 mb-4 max-w-sm">
-                  {scanPhase}
-                </p>
-                <div className="w-64 h-2 bg-slate-700 rounded-full overflow-hidden">
+              ))}
+
+              {/* Add Additional Angle Slot */}
+              {selectedImages.length < MAX_IMAGES && !isScanning && (
+                <div className="aspect-4/3 rounded-2xl border-2 border-dashed border-slate-200 hover:border-teal-400 flex flex-col items-center justify-center p-3 text-center bg-slate-50/60 transition-colors">
+                  <p className="text-xs font-semibold text-slate-700 mb-2">
+                    Add Angle {selectedImages.length + 1} of {MAX_IMAGES}
+                  </p>
+                  <div className="flex items-center gap-2">
+                    <button
+                      type="button"
+                      onClick={() => nativeCameraInputRef.current?.click()}
+                      className="px-2.5 py-1.5 rounded-xl bg-teal-50 hover:bg-teal-100 text-teal-800 text-xs font-semibold flex items-center gap-1 border border-teal-200 transition-colors"
+                    >
+                      <Camera className="w-3.5 h-3.5" />
+                      <span>Camera</span>
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => galleryInputRef.current?.click()}
+                      className="px-2.5 py-1.5 rounded-xl bg-white hover:bg-slate-100 text-slate-700 text-xs font-semibold flex items-center gap-1 border border-slate-200 transition-colors"
+                    >
+                      <Upload className="w-3.5 h-3.5" />
+                      <span>Upload</span>
+                    </button>
+                  </div>
+                </div>
+              )}
+            </div>
+
+            {/* Scanning Progress Overlay */}
+            {isScanning && (
+              <div className="p-4 rounded-2xl bg-slate-900 text-white text-center space-y-2">
+                <div className="flex items-center justify-center gap-2 text-teal-400 text-sm font-bold">
+                  <Sparkles className="w-4 h-4 animate-spin" />
+                  <span>Gemini Multi-Image Vision Processing...</span>
+                </div>
+                <p className="text-xs text-teal-200">{scanPhase}</p>
+                <div className="w-full max-w-md mx-auto h-2 bg-slate-800 rounded-full overflow-hidden">
                   <div
                     className="h-full bg-gradient-to-r from-teal-400 to-emerald-400 transition-all duration-300"
                     style={{ width: `${scanProgress}%` }}
@@ -379,39 +529,68 @@ export const QuickScanTab: React.FC<QuickScanTabProps> = ({
                 </div>
               </div>
             )}
+
+            {/* Scan Trigger Button */}
+            {!isScanning && !extractedPreview && (
+              <button
+                type="button"
+                onClick={() => processImagesWithAI()}
+                className="w-full py-3.5 rounded-2xl bg-teal-600 hover:bg-teal-700 active:scale-98 text-white font-bold text-sm shadow-lg shadow-teal-600/30 flex items-center justify-center gap-2 transition-all"
+              >
+                <Sparkles className="w-4 h-4" />
+                <span>
+                  Scan {selectedImages.length} Image{selectedImages.length > 1 ? 's' : ''} with Gemini AI
+                </span>
+              </button>
+            )}
           </div>
         )}
 
-        {/* Upload & Drag Drop Box (When no camera & no image) */}
-        {!cameraActive && !selectedImage && (
-          <div
-            onClick={() => fileInputRef.current?.click()}
-            className="border-2 border-dashed border-slate-300 hover:border-teal-500 rounded-2xl p-8 sm:p-10 flex flex-col items-center justify-center text-center cursor-pointer transition-colors bg-slate-50/50 hover:bg-teal-50/20 group"
-          >
-            <div className="w-14 h-14 rounded-2xl bg-teal-50 text-teal-600 flex items-center justify-center mb-3 group-hover:scale-110 transition-transform">
-              <Upload className="w-6 h-6 stroke-[2.2]" />
+        {/* Empty State: Dual Action Cards (Camera + Gallery) */}
+        {!cameraActive && selectedImages.length === 0 && (
+          <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
+            {/* Native Mobile Camera Button */}
+            <div
+              onClick={() => nativeCameraInputRef.current?.click()}
+              className="border-2 border-dashed border-slate-300 hover:border-teal-500 rounded-2xl p-6 sm:p-8 flex flex-col items-center justify-center text-center cursor-pointer transition-all bg-slate-50/50 hover:bg-teal-50/20 group"
+            >
+              <div className="w-12 h-12 rounded-2xl bg-teal-50 text-teal-600 flex items-center justify-center mb-3 group-hover:scale-110 transition-transform">
+                <Camera className="w-6 h-6 stroke-[2.2]" />
+              </div>
+              <h3 className="font-bold text-slate-800 text-sm sm:text-base">
+                Take Photo with Camera
+              </h3>
+              <p className="text-xs text-slate-500 mt-1 max-w-xs">
+                Opens your device camera directly with back/macro mode.
+              </p>
+              <span className="mt-3 inline-flex items-center gap-1.5 px-3 py-1 rounded-full bg-teal-600 text-white text-xs font-semibold shadow-xs">
+                <Camera className="w-3.5 h-3.5" /> Capture Packaging
+              </span>
             </div>
-            <h3 className="font-bold text-slate-800 text-sm sm:text-base">
-              Upload Medicine Picture
-            </h3>
-            <p className="text-xs text-slate-500 mt-1 max-w-xs">
-              Take a photo or upload from gallery. Supports JPEG, PNG, WEBP.
-            </p>
-            <span className="mt-3 inline-flex items-center gap-1.5 px-3 py-1 rounded-full bg-white border border-slate-200 text-xs font-medium text-slate-700 shadow-2xs">
-              <Camera className="w-3.5 h-3.5 text-teal-600" /> Browse File / Gallery
-            </span>
-            <input
-              ref={fileInputRef}
-              type="file"
-              accept="image/*"
-              className="hidden"
-              onChange={handleFileUpload}
-            />
+
+            {/* Gallery / Multiple Upload */}
+            <div
+              onClick={() => galleryInputRef.current?.click()}
+              className="border-2 border-dashed border-slate-300 hover:border-teal-500 rounded-2xl p-6 sm:p-8 flex flex-col items-center justify-center text-center cursor-pointer transition-all bg-slate-50/50 hover:bg-teal-50/20 group"
+            >
+              <div className="w-12 h-12 rounded-2xl bg-teal-50 text-teal-600 flex items-center justify-center mb-3 group-hover:scale-110 transition-transform">
+                <Upload className="w-6 h-6 stroke-[2.2]" />
+              </div>
+              <h3 className="font-bold text-slate-800 text-sm sm:text-base">
+                Upload from Gallery
+              </h3>
+              <p className="text-xs text-slate-500 mt-1 max-w-xs">
+                Select up to 3 images at once (front, back, side panels).
+              </p>
+              <span className="mt-3 inline-flex items-center gap-1.5 px-3 py-1 rounded-full bg-white border border-slate-200 text-xs font-medium text-slate-700 shadow-2xs">
+                <ImageIcon className="w-3.5 h-3.5 text-teal-600" /> Multi-File Upload
+              </span>
+            </div>
           </div>
         )}
 
         {/* Extracted Preview Card & Next Step Action */}
-        {extractedPreview && selectedImage && !isScanning && (
+        {extractedPreview && selectedImages.length > 0 && !isScanning && (
           <div className="p-4 sm:p-5 rounded-2xl bg-gradient-to-br from-teal-50/80 via-emerald-50/40 to-white border border-teal-200/90 shadow-sm space-y-4 animate-in slide-in-from-bottom-2 duration-300">
             <div className="flex items-start justify-between gap-3">
               <div className="flex items-center gap-2">
@@ -428,21 +607,21 @@ export const QuickScanTab: React.FC<QuickScanTabProps> = ({
                     </span>
                   </div>
                   <p className="text-xs text-slate-500">
+                    Extracted across {selectedImages.length} packaging angle(s){' '}
                     {extractedPreview.isLiveGemini
-                      ? 'Extracted via Google Gemini Pro Vision API'
-                      : 'Extracted via Medical Vision Heuristic'}
+                      ? 'via Google Gemini Pro Vision'
+                      : 'via Medical Heuristic'}
                   </p>
                 </div>
               </div>
 
               <button
                 onClick={() => {
-                  setSelectedImage(null);
                   setExtractedPreview(null);
                 }}
                 className="text-xs text-slate-500 hover:text-slate-800 font-medium px-2 py-1 rounded-lg hover:bg-slate-200/50"
               >
-                Retake
+                Re-scan
               </button>
             </div>
 
@@ -450,7 +629,7 @@ export const QuickScanTab: React.FC<QuickScanTabProps> = ({
             <div className="grid grid-cols-2 sm:grid-cols-4 gap-2.5 text-xs">
               <div className="p-2.5 rounded-xl bg-white border border-slate-200/80 shadow-2xs">
                 <span className="text-slate-400 block text-[10px] font-medium uppercase">Medicine Name</span>
-                <span className="font-bold text-slate-900 line-clamp-1">{extractedPreview.data.name}</span>
+                <span className="font-bold text-slate-900 line-clamp-1">{extractedPreview.data.name || 'Not detected'}</span>
               </div>
               <div className="p-2.5 rounded-xl bg-white border border-slate-200/80 shadow-2xs">
                 <span className="text-slate-400 block text-[10px] font-medium uppercase">Category</span>
@@ -459,14 +638,16 @@ export const QuickScanTab: React.FC<QuickScanTabProps> = ({
               <div className="p-2.5 rounded-xl bg-white border border-slate-200/80 shadow-2xs">
                 <span className="text-slate-400 block text-[10px] font-medium uppercase">MRP & Selling</span>
                 <span className="font-bold text-slate-900">
-                  ₹{extractedPreview.data.selling_price}{' '}
-                  <span className="text-slate-400 line-through text-[11px]">₹{extractedPreview.data.mrp}</span>
+                  {extractedPreview.data.selling_price ? `₹${extractedPreview.data.selling_price}` : '—'}{' '}
+                  {extractedPreview.data.mrp ? (
+                    <span className="text-slate-400 line-through text-[11px]">₹{extractedPreview.data.mrp}</span>
+                  ) : null}
                 </span>
               </div>
               <div className="p-2.5 rounded-xl bg-white border border-slate-200/80 shadow-2xs">
                 <span className="text-slate-400 block text-[10px] font-medium uppercase">Batch / Expiry</span>
                 <span className="font-bold text-slate-900">
-                  {extractedPreview.data.batch_no} • {extractedPreview.data.expiry_date}
+                  {extractedPreview.data.batch_no || 'None'} • {extractedPreview.data.expiry_date || 'None'}
                 </span>
               </div>
             </div>

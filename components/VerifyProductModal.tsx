@@ -25,7 +25,9 @@ interface VerifyProductModalProps {
   onClose: () => void;
   initialData?: Partial<Product> | null;
   scannedImage?: string | null;
+  scannedImages?: string[] | null;
   onSaved: (savedProduct: Product, source: string) => void;
+  onError?: (errorMessage: string) => void;
   isAiExtracted?: boolean;
 }
 
@@ -44,7 +46,9 @@ export const VerifyProductModal: React.FC<VerifyProductModalProps> = ({
   onClose,
   initialData,
   scannedImage,
+  scannedImages,
   onSaved,
+  onError,
   isAiExtracted = false,
 }) => {
   const [name, setName] = useState('');
@@ -61,6 +65,7 @@ export const VerifyProductModal: React.FC<VerifyProductModalProps> = ({
   const [composition, setComposition] = useState('');
   const [rackLocation, setRackLocation] = useState('Shelf A-1');
   const [imageUrl, setImageUrl] = useState<string>('');
+  const [allImages, setAllImages] = useState<string[]>([]);
 
   const [isSaving, setIsSaving] = useState(false);
   const [errorMsg, setErrorMsg] = useState('');
@@ -95,48 +100,62 @@ export const VerifyProductModal: React.FC<VerifyProductModalProps> = ({
         setRackLocation(meta.rack_location || 'Shelf A-1');
       }
 
-      if (scannedImage) {
-        setImageUrl(scannedImage);
+      // Handle multi-images
+      const imagesList: string[] = [];
+      if (scannedImages && scannedImages.length > 0) {
+        imagesList.push(...scannedImages);
+      } else if (scannedImage) {
+        imagesList.push(scannedImage);
       } else if (initialData?.image_url) {
-        setImageUrl(initialData.image_url);
-      } else {
-        setImageUrl('');
+        imagesList.push(initialData.image_url);
       }
 
+      setAllImages(imagesList);
+      setImageUrl(imagesList[0] || '');
       setErrorMsg('');
     }
-  }, [isOpen, initialData, scannedImage]);
+  }, [isOpen, initialData, scannedImage, scannedImages]);
 
-  // Handle MRP change -> auto update selling price or discount
+  // Handle MRP change -> auto update selling price using current discount %
   const handleMrpChange = (valStr: string) => {
     setMrp(valStr);
-    const numMrp = parseFloat(valStr) || 0;
+    const numMrp = parseFloat(valStr);
     const numDiscount = parseFloat(String(discountPercent)) || 0;
-    if (numMrp > 0) {
-      const calculatedSelling = Math.max(0, numMrp * (1 - numDiscount / 100));
-      setSellingPrice(Math.round(calculatedSelling * 100) / 100);
+    if (!isNaN(numMrp) && numMrp >= 0) {
+      const calculatedSelling = Number((numMrp - (numMrp * (numDiscount / 100))).toFixed(2));
+      setSellingPrice(calculatedSelling);
     }
   };
 
-  // Handle Selling Price change -> auto update discount percent
+  // Handle Selling Price change -> auto recalculate discount %
   const handleSellingPriceChange = (valStr: string) => {
     setSellingPrice(valStr);
-    const numSelling = parseFloat(valStr) || 0;
+    const numSelling = parseFloat(valStr);
     const numMrp = parseFloat(String(mrp)) || 0;
-    if (numMrp > 0 && numSelling <= numMrp) {
-      const calculatedDisc = ((numMrp - numSelling) / numMrp) * 100;
-      setDiscountPercent(Math.round(calculatedDisc * 100) / 100);
+    if (!isNaN(numSelling) && numMrp > 0) {
+      const calculatedDisc = Number((((numMrp - numSelling) / numMrp) * 100).toFixed(2));
+      setDiscountPercent(calculatedDisc);
     }
   };
 
   // Handle Discount change -> auto update selling price
   const handleDiscountChange = (valStr: string) => {
     setDiscountPercent(valStr);
-    const numDiscount = parseFloat(valStr) || 0;
+    const numDiscount = parseFloat(valStr);
     const numMrp = parseFloat(String(mrp)) || 0;
-    if (numMrp > 0) {
-      const calculatedSelling = Math.max(0, numMrp * (1 - numDiscount / 100));
-      setSellingPrice(Math.round(calculatedSelling * 100) / 100);
+    if (!isNaN(numDiscount) && numMrp >= 0) {
+      const calculatedSelling = Number((numMrp - (numMrp * (numDiscount / 100))).toFixed(2));
+      setSellingPrice(calculatedSelling);
+    }
+  };
+
+  // Quick preset buttons for admin (0%, 5%, 10%, 15%, 20%)
+  const applyDiscountPreset = (preset: number) => {
+    setDiscountPercent(preset);
+    const numMrp = parseFloat(String(mrp)) || 0;
+    if (numMrp >= 0) {
+      const calculatedSelling = Number((numMrp - (numMrp * (preset / 100))).toFixed(2));
+      setSellingPrice(calculatedSelling);
     }
   };
 
@@ -188,13 +207,14 @@ export const VerifyProductModal: React.FC<VerifyProductModalProps> = ({
         in_stock: numStock > 0,
         stock_quantity: numStock,
         image_url: finalImageUrl || null,
-        batch_no: batchNo.trim() || `B-${Math.floor(1000 + Math.random() * 9000)}`,
-        expiry_date: expiryDate.trim() || '2027-12',
-        manufacturer: manufacturer.trim() || 'Generic Pharma',
-        barcode: barcode.trim() || `${Date.now()}`.slice(-12),
+        batch_no: batchNo.trim() || null,
+        expiry_date: expiryDate.trim() || null,
+        manufacturer: manufacturer.trim() || null,
+        barcode: barcode.trim() || null,
         metadata: {
           composition: composition.trim() || undefined,
           rack_location: rackLocation.trim() || 'General Rack',
+          ...(allImages.length > 1 ? { scanned_angles_count: allImages.length } : {}),
         },
       };
 
@@ -217,7 +237,11 @@ export const VerifyProductModal: React.FC<VerifyProductModalProps> = ({
       onClose();
     } catch (err: any) {
       console.error('Error saving product to database:', err);
-      setErrorMsg(err?.message || 'Failed to save product. Please check connection.');
+      const errMsg = err?.message || 'Failed to save product. Please check Supabase connection and schema.';
+      setErrorMsg(errMsg);
+      if (onError) {
+        onError(errMsg);
+      }
     } finally {
       setIsSaving(false);
     }
@@ -301,6 +325,29 @@ export const VerifyProductModal: React.FC<VerifyProductModalProps> = ({
                   />
                 </label>
               </div>
+
+              {/* Multi-angle packaging thumbnail selector */}
+              {allImages.length > 1 && (
+                <div className="flex items-center gap-1.5 mt-2 overflow-x-auto w-full py-1">
+                  {allImages.map((img, idx) => (
+                    <button
+                      key={idx}
+                      type="button"
+                      onClick={() => setImageUrl(img)}
+                      className={`relative w-8 h-8 rounded-lg overflow-hidden border-2 transition-all shrink-0 ${
+                        imageUrl === img ? 'border-teal-500 ring-1 ring-teal-300 scale-105' : 'border-slate-200 opacity-60 hover:opacity-100'
+                      }`}
+                      title={`Select Angle ${idx + 1}`}
+                    >
+                      {/* eslint-disable-next-line @next/next/no-img-element */}
+                      <img src={img} alt={`Angle ${idx + 1}`} className="w-full h-full object-cover" />
+                      <span className="absolute bottom-0 right-0 bg-slate-900/80 text-[8px] text-white px-0.5 rounded-tl font-mono">
+                        {idx + 1}
+                      </span>
+                    </button>
+                  ))}
+                </div>
+              )}
             </div>
 
             {/* Medicine Name & Category */}
@@ -343,51 +390,104 @@ export const VerifyProductModal: React.FC<VerifyProductModalProps> = ({
             </div>
           </div>
 
-          {/* Pricing & Discounts Grid */}
-          <div className="grid grid-cols-3 gap-3">
-            <div>
-              <label className="block text-xs font-semibold text-slate-700 mb-1">
-                MRP (₹) *
-              </label>
-              <input
-                type="number"
-                step="0.01"
-                min="0"
-                required
-                value={mrp}
-                onChange={(e) => handleMrpChange(e.target.value)}
-                className="w-full px-3 py-2 text-sm rounded-xl border border-slate-300 focus:border-teal-500 focus:ring-2 focus:ring-teal-100 outline-none transition-all font-semibold text-slate-900"
-              />
+          {/* Pricing & Discounts Grid (Admin-Friendly Real-Time Calculation) */}
+          <div className="p-3.5 rounded-2xl bg-teal-50/40 border border-teal-100 space-y-3">
+            <div className="grid grid-cols-1 sm:grid-cols-3 gap-3">
+              {/* 1. MRP */}
+              <div>
+                <label className="block text-xs font-semibold text-slate-700 mb-1 flex items-center justify-between">
+                  <span>MRP (₹) *</span>
+                  <span className="text-[10px] text-slate-400 font-normal">Base Price</span>
+                </label>
+                <div className="relative">
+                  <span className="absolute left-3 top-2 text-sm font-semibold text-slate-400">₹</span>
+                  <input
+                    type="number"
+                    step="0.01"
+                    min="0"
+                    required
+                    value={mrp}
+                    onChange={(e) => handleMrpChange(e.target.value)}
+                    placeholder="100.00"
+                    className="w-full pl-7 pr-3 py-2 text-sm rounded-xl border border-slate-300 focus:border-teal-500 focus:ring-2 focus:ring-teal-100 outline-none transition-all font-semibold text-slate-900 bg-white"
+                  />
+                </div>
+              </div>
+
+              {/* 2. Admin Discount (%) Input */}
+              <div>
+                <label className="block text-xs font-semibold text-slate-700 mb-1 flex items-center justify-between">
+                  <span>Discount (%)</span>
+                  <span className="text-[10px] text-teal-600 font-medium">Auto-calculates</span>
+                </label>
+                <div className="relative">
+                  <input
+                    type="number"
+                    step="0.01"
+                    min="0"
+                    max="100"
+                    value={discountPercent}
+                    onChange={(e) => handleDiscountChange(e.target.value)}
+                    placeholder="10"
+                    className="w-full pl-3 pr-7 py-2 text-sm rounded-xl border border-teal-300 focus:border-teal-500 focus:ring-2 focus:ring-teal-100 outline-none transition-all font-semibold text-teal-900 bg-white"
+                  />
+                  <Percent className="w-3.5 h-3.5 text-teal-500 absolute right-2.5 top-3 pointer-events-none" />
+                </div>
+              </div>
+
+              {/* 3. Live Selling Price (Admin sees final price instantly) */}
+              <div>
+                <label className="block text-xs font-semibold text-slate-700 mb-1 flex items-center justify-between">
+                  <span>Selling Price (₹) *</span>
+                  <span className="text-[10px] text-emerald-600 font-semibold">Final Price</span>
+                </label>
+                <div className="relative">
+                  <span className="absolute left-3 top-2 text-sm font-bold text-teal-600">₹</span>
+                  <input
+                    type="number"
+                    step="0.01"
+                    min="0"
+                    required
+                    value={sellingPrice}
+                    onChange={(e) => handleSellingPriceChange(e.target.value)}
+                    placeholder="90.00"
+                    className="w-full pl-7 pr-3 py-2 text-sm rounded-xl border-2 border-teal-500 bg-white focus:border-teal-600 focus:ring-2 focus:ring-teal-100 outline-none transition-all font-bold text-teal-900 shadow-xs"
+                  />
+                </div>
+              </div>
             </div>
-            <div>
-              <label className="block text-xs font-semibold text-slate-700 mb-1">
-                Selling Price (₹) *
-              </label>
-              <input
-                type="number"
-                step="0.01"
-                min="0"
-                required
-                value={sellingPrice}
-                onChange={(e) => handleSellingPriceChange(e.target.value)}
-                className="w-full px-3 py-2 text-sm rounded-xl border border-teal-400 bg-teal-50/30 focus:border-teal-600 focus:ring-2 focus:ring-teal-100 outline-none transition-all font-bold text-teal-800"
-              />
-            </div>
-            <div>
-              <label className="block text-xs font-semibold text-slate-700 mb-1">
-                Discount (%)
-              </label>
-              <div className="relative">
-                <input
-                  type="number"
-                  step="0.01"
-                  min="0"
-                  max="100"
-                  value={discountPercent}
-                  onChange={(e) => handleDiscountChange(e.target.value)}
-                  className="w-full pl-3 pr-7 py-2 text-sm rounded-xl border border-slate-300 focus:border-teal-500 focus:ring-2 focus:ring-teal-100 outline-none transition-all font-medium text-slate-900"
-                />
-                <Percent className="w-3.5 h-3.5 text-slate-400 absolute right-2.5 top-3 pointer-events-none" />
+
+            {/* Quick Discount Presets & Live Calculation Summary */}
+            <div className="flex flex-wrap items-center justify-between gap-2 pt-1 border-t border-teal-100/70 text-xs">
+              <div className="flex items-center gap-1.5 flex-wrap">
+                <span className="text-[11px] font-medium text-slate-500">Quick Presets:</span>
+                {[0, 5, 10, 15, 20, 25].map((preset) => (
+                  <button
+                    key={preset}
+                    type="button"
+                    onClick={() => applyDiscountPreset(preset)}
+                    className={`px-2 py-0.5 rounded-md text-[11px] font-semibold transition-all ${
+                      Number(discountPercent) === preset
+                        ? 'bg-teal-600 text-white shadow-xs'
+                        : 'bg-white text-teal-700 border border-teal-200 hover:bg-teal-50'
+                    }`}
+                  >
+                    {preset}%
+                  </button>
+                ))}
+              </div>
+
+              <div className="text-[11px] font-medium text-teal-800 bg-white px-2.5 py-1 rounded-lg border border-teal-200 shadow-2xs">
+                {Number(mrp) > 0 ? (
+                  <span>
+                    ₹{Number(mrp).toFixed(2)} - {Number(discountPercent || 0)}% = <strong className="text-teal-900 font-bold">₹{Number(sellingPrice || 0).toFixed(2)}</strong>{' '}
+                    <span className="text-emerald-600">
+                      (Saves ₹{Math.max(0, Number(mrp) - Number(sellingPrice || 0)).toFixed(2)})
+                    </span>
+                  </span>
+                ) : (
+                  <span className="text-slate-400">Enter MRP to preview discount calculation</span>
+                )}
               </div>
             </div>
           </div>

@@ -31,7 +31,7 @@ import {
   saveLocalSales
 } from '@/lib/supabase';
 import { INITIAL_PRODUCTS, INITIAL_SALES } from '@/lib/mockData';
-import { CheckCircle2, AlertCircle, Info, X } from 'lucide-react';
+import { Toast, ToastData } from '@/components/Toast';
 
 export default function MediStoreApp() {
   const [currentTab, setCurrentTab] = useState<TabType>('dashboard');
@@ -46,22 +46,20 @@ export default function MediStoreApp() {
   const [verifyModalOpen, setVerifyModalOpen] = useState(false);
   const [verifyModalData, setVerifyModalData] = useState<Partial<Product> | null>(null);
   const [verifyModalImage, setVerifyModalImage] = useState<string | null>(null);
+  const [verifyModalImages, setVerifyModalImages] = useState<string[]>([]);
   const [isAiExtracted, setIsAiExtracted] = useState(false);
 
   const [barcodeModalProduct, setBarcodeModalProduct] = useState<Product | null>(null);
 
   // Toast notification state
-  const [toast, setToast] = useState<{
-    show: boolean;
-    type: 'success' | 'error' | 'info';
-    message: string;
-  } | null>(null);
+  const [toast, setToast] = useState<ToastData | null>(null);
 
-  const showToast = (message: string, type: 'success' | 'error' | 'info' = 'success') => {
-    setToast({ show: true, type, message });
-    setTimeout(() => {
-      setToast(null);
-    }, 4000);
+  const showToast = (
+    message: string, 
+    type: 'success' | 'error' | 'info' = 'success', 
+    title?: string
+  ) => {
+    setToast({ type, message, title });
   };
 
   // Load initial settings & verify connection
@@ -112,6 +110,7 @@ export default function MediStoreApp() {
   const handleOpenAddModal = () => {
     setVerifyModalData(null);
     setVerifyModalImage(null);
+    setVerifyModalImages([]);
     setIsAiExtracted(false);
     setVerifyModalOpen(true);
   };
@@ -119,6 +118,7 @@ export default function MediStoreApp() {
   const handleEditProduct = (product: Product) => {
     setVerifyModalData(product);
     setVerifyModalImage(product.image_url || null);
+    setVerifyModalImages(product.image_url ? [product.image_url] : []);
     setIsAiExtracted(false);
     setVerifyModalOpen(true);
   };
@@ -159,9 +159,10 @@ export default function MediStoreApp() {
   // AI Scan Complete Handler
   const handleScanComplete = (
     extracted: ExtractedProductData,
-    scannedImage: string,
+    scannedImages: string[] | string,
     isLiveGemini: boolean
   ) => {
+    const imagesArr = Array.isArray(scannedImages) ? scannedImages : [scannedImages];
     setVerifyModalData({
       name: extracted.name,
       category_name: extracted.category_name,
@@ -170,24 +171,25 @@ export default function MediStoreApp() {
       discount_percentage: extracted.discount_percentage,
       unit: extracted.unit,
       stock_quantity: extracted.stock_quantity,
-      batch_no: extracted.batch_no,
-      expiry_date: extracted.expiry_date,
-      manufacturer: extracted.manufacturer,
-      barcode: extracted.barcode,
+      batch_no: extracted.batch_no || '',
+      expiry_date: extracted.expiry_date || '',
+      manufacturer: extracted.manufacturer || '',
+      barcode: extracted.barcode || '',
       metadata: {
         composition: extracted.composition,
         dosage: extracted.dosage,
         schedule: 'OTC',
       },
     });
-    setVerifyModalImage(scannedImage);
+    setVerifyModalImage(imagesArr[0] || null);
+    setVerifyModalImages(imagesArr);
     setIsAiExtracted(true);
     setVerifyModalOpen(true);
 
     showToast(
       isLiveGemini
-        ? 'AI extracted medicine packaging successfully with Gemini Pro Vision!'
-        : 'AI extraction completed via smart fallback heuristic.',
+        ? `AI analyzed ${imagesArr.length} packaging angle(s) with Gemini Pro Vision!`
+        : `AI analyzed ${imagesArr.length} image(s) via fallback heuristic.`,
       'success'
     );
   };
@@ -303,31 +305,8 @@ export default function MediStoreApp() {
         )}
       </main>
 
-      {/* Toast Notification Banner */}
-      {toast && (
-        <div className="fixed top-18 right-4 z-50 max-w-sm animate-in slide-in-from-top-3 fade-in duration-200">
-          <div
-            className={`px-4 py-3 rounded-2xl shadow-xl border flex items-center gap-2.5 text-xs font-semibold ${
-              toast.type === 'success'
-                ? 'bg-emerald-900 text-emerald-100 border-emerald-700'
-                : toast.type === 'error'
-                ? 'bg-rose-900 text-rose-100 border-rose-700'
-                : 'bg-slate-900 text-slate-100 border-slate-700'
-            }`}
-          >
-            {toast.type === 'success' && <CheckCircle2 className="w-4 h-4 text-emerald-400 shrink-0" />}
-            {toast.type === 'error' && <AlertCircle className="w-4 h-4 text-rose-400 shrink-0" />}
-            {toast.type === 'info' && <Info className="w-4 h-4 text-teal-400 shrink-0" />}
-            <span className="flex-1">{toast.message}</span>
-            <button
-              onClick={() => setToast(null)}
-              className="p-1 hover:opacity-70 text-slate-300"
-            >
-              <X className="w-3.5 h-3.5" />
-            </button>
-          </div>
-        </div>
-      )}
+      {/* Viewport-Safe Medical Grade Toast Notification (z-[9999]) */}
+      <Toast toast={toast} onDismiss={() => setToast(null)} />
 
       {/* Verify / Add Product Modal */}
       <VerifyProductModal
@@ -335,7 +314,9 @@ export default function MediStoreApp() {
         onClose={() => setVerifyModalOpen(false)}
         initialData={verifyModalData}
         scannedImage={verifyModalImage}
+        scannedImages={verifyModalImages}
         onSaved={handleProductSaved}
+        onError={(errMsg) => showToast(errMsg, 'error')}
         isAiExtracted={isAiExtracted}
       />
 
